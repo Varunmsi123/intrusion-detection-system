@@ -1,0 +1,91 @@
+IDS Model Training Report
+============================================================
+
+Model: Random Forest ← SAVED
+  Accuracy  : 0.9998
+  F1 (wtd)  : 0.9998
+  Precision : 0.9998
+  Recall    : 0.9998
+  Train time: 82.59s
+
+Classification Report:
+              precision    recall  f1-score   support
+
+         DoS       1.00      1.00      1.00     61817
+      Normal       1.00      1.00      1.00    203202
+       Probe       1.00      0.99      1.00      3462
+         R2L       1.00      0.96      0.98       250
+         U2R       0.83      0.38      0.53        13
+
+    accuracy                           1.00    268744
+   macro avg       0.97      0.87      0.90    268744
+weighted avg       1.00      1.00      1.00    268744
+
+------------------------------------------------------------
+
+Model: Decision Tree
+  Accuracy  : 0.9996
+  F1 (wtd)  : 0.9996
+  Precision : 0.9996
+  Recall    : 0.9996
+  Train time: 12.50s
+
+Classification Report:
+              precision    recall  f1-score   support
+
+         DoS       1.00      1.00      1.00     61817
+      Normal       1.00      1.00      1.00    203202
+       Probe       0.99      1.00      1.00      3462
+         R2L       0.79      0.97      0.87       250
+         U2R       0.83      0.38      0.53        13
+
+    accuracy                           1.00    268744
+   macro avg       0.92      0.87      0.88    268744
+weighted avg       1.00      1.00      1.00    268744
+
+------------------------------------------------------------
+
+Model: KNN
+  Accuracy  : 0.9995
+  F1 (wtd)  : 0.9995
+  Precision : 0.9995
+  Recall    : 0.9995
+  Train time: 0.12s
+
+Classification Report:
+              precision    recall  f1-score   support
+
+         DoS       1.00      1.00      1.00     61817
+      Normal       1.00      1.00      1.00    203202
+       Probe       0.99      0.98      0.99      3462
+         R2L       0.93      0.92      0.93       250
+         U2R       0.50      0.31      0.38        13
+
+    accuracy                           1.00    268744
+   macro avg       0.89      0.84      0.86    268744
+weighted avg       1.00      1.00      1.00    268744
+
+------------------------------------------------------------
+
+Model: Logistic Regression
+  Accuracy  : 0.9392
+  F1 (wtd)  : 0.9597
+  Precision : 0.9882
+  Recall    : 0.9392
+  Train time: 231.09s
+
+Classification Report:
+              precision    recall  f1-score   support
+
+         DoS       1.00      1.00      1.00     61817
+      Normal       1.00      0.92      0.96    203202
+       Probe       0.28      0.95      0.43      3462
+         R2L       0.06      0.97      0.11       250
+         U2R       0.00      0.77      0.01        13
+
+    accuracy                           0.94    268744
+   macro avg       0.47      0.92      0.50    268744
+weighted avg       0.99      0.94      0.96    268744
+
+------------------------------------------------------------
+
