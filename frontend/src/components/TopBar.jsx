@@ -19,10 +19,10 @@ const ITEMS = [
   { key: "uptime_seconds",  label: "Uptime",      color: "text-emerald-400", fmt: fmtUptime },
 ]
 
-export default function TopBar({ stats }) {
+export default function TopBar({ stats, isPaused }) {
   return (
     <div
-      className="border-b border-white/[0.05] px-5 py-1.5 flex gap-6 overflow-x-auto"
+      className="border-b border-white/[0.05] px-5 py-1.5 flex gap-6 overflow-x-auto items-center"
       style={{ background: "rgba(10,13,20,0.85)" }}
     >
       {ITEMS.map(({ key, label, color, fmt: f }) => (
@@ -33,6 +33,14 @@ export default function TopBar({ stats }) {
           </span>
         </div>
       ))}
+
+      {/* Paused indicator */}
+      {isPaused && (
+        <div className="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-amber-500/30 bg-amber-500/10">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+          <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider">Capture Paused</span>
+        </div>
+      )}
     </div>
   )
 }

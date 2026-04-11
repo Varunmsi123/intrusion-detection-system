@@ -1,12 +1,9 @@
 """
 app.py — IDS Dashboard Backend
-Real-time packet capture on Windows WiFi + ML classification
-
-Run as Administrator:
-    python app.py
+Real-time packet capture + ML classification with simulation fallback.
 """
 
-from flask import Flask
+from flask import Flask, jsonify
 from flask_socketio import SocketIO
 from flask_cors import CORS
 import threading
@@ -15,12 +12,12 @@ from datetime import datetime
 from collections import deque
 
 from predict import IDSPredictor
-from capture import start_capture
+from capture import start_capture, get_capture_engine
 
 # ── Flask Setup ────────────────────────────────────────────
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "ids-secret"
-CORS(app, origins="*")
+CORS(app, origins="*", supports_credentials=True)
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
@@ -37,16 +34,19 @@ ids = IDSPredictor("models/")
 
 # ── Shared State ───────────────────────────────────────────
 stats = {
-    "total_packets":  0,
-    "total_alerts":   0,
+    "total_packets":   0,
+    "total_alerts":    0,
     "packets_per_sec": 0,
-    "active_flows":   0,
-    "uptime_seconds": 0,
+    "active_flows":    0,
+    "uptime_seconds":  0,
+    "is_paused":       False,   # starts ACTIVE (not paused)
 }
 class_counts = {"Normal": 0, "DoS": 0, "Probe": 0, "R2L": 0, "U2R": 0}
-alert_log    = deque(maxlen=200)
+alert_log    = deque(maxlen=300)
+raw_log      = deque(maxlen=300)
 timeline     = deque(maxlen=60)
 start_time   = time.time()
+
 
 # ── Stats broadcaster (every 1 second) ────────────────────
 def broadcast_stats():
@@ -54,24 +54,20 @@ def broadcast_stats():
     while True:
         time.sleep(1)
 
-        # Calculate packets per second
         current = stats["total_packets"]
-        stats["packets_per_sec"]  = current - prev_packets
-        stats["uptime_seconds"]   = int(time.time() - start_time)
+        stats["packets_per_sec"] = current - prev_packets
+        stats["uptime_seconds"]  = int(time.time() - start_time)
         prev_packets = current
 
-        # Timeline snapshot
-        snapshot = {
+        timeline.append({
             "time":   datetime.now().strftime("%H:%M:%S"),
             "Normal": class_counts.get("Normal", 0),
-            "DoS":    class_counts.get("DoS", 0),
-            "Probe":  class_counts.get("Probe", 0),
-            "R2L":    class_counts.get("R2L", 0),
-            "U2R":    class_counts.get("U2R", 0),
-        }
-        timeline.append(snapshot)
+            "DoS":    class_counts.get("DoS",    0),
+            "Probe":  class_counts.get("Probe",  0),
+            "R2L":    class_counts.get("R2L",    0),
+            "U2R":    class_counts.get("U2R",    0),
+        })
 
-        # Emit to all connected clients
         socketio.emit("stats_update", {
             "stats":        stats,
             "class_counts": class_counts,
@@ -86,52 +82,80 @@ def health():
 
 @app.route("/api/stats")
 def get_stats():
-    return {
+    return jsonify({
         "stats":        stats,
         "class_counts": class_counts,
         "timeline":     list(timeline),
-    }
+    })
 
 @app.route("/api/alerts")
 def get_alerts():
-    return list(alert_log)
+    return jsonify(list(alert_log))
+
+@app.route("/api/raw")
+def get_raw():
+    return jsonify(list(raw_log))
+
+@app.route("/api/pause", methods=["POST", "OPTIONS"])
+def pause_capture():
+    if not stats.get("is_paused", False):
+        engine = get_capture_engine()
+        if engine:
+            engine.pause()
+        stats["is_paused"] = True
+        socketio.emit("capture_state", {"is_paused": True})
+    return jsonify({"status": "paused", "is_paused": True})
+
+@app.route("/api/resume", methods=["POST", "OPTIONS"])
+def resume_capture():
+    if stats.get("is_paused", False):
+        engine = get_capture_engine()
+        if engine:
+            engine.resume()
+        stats["is_paused"] = False
+        socketio.emit("capture_state", {"is_paused": False})
+    return jsonify({"status": "resumed", "is_paused": False})
 
 
 # ── Socket Events ──────────────────────────────────────────
 @socketio.on("connect")
 def on_connect():
     print("Dashboard connected")
+    # Send current state to newly connected client
     socketio.emit("stats_update", {
         "stats":        stats,
         "class_counts": class_counts,
         "timeline":     list(timeline),
     })
-    for alert in list(alert_log)[:30]:
+    socketio.emit("capture_state", {"is_paused": stats.get("is_paused", False)})
+    # Replay recent history
+    for alert in list(alert_log)[:50]:
         socketio.emit("new_alert", alert)
+    if list(raw_log):
+        socketio.emit("raw_batch", list(raw_log)[:50])
 
 
 # ── Entry Point ────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 50)
     print("  IDS Real-Time Dashboard")
-    print("  WiFi: Intel Wireless-AC 9461")
+    print("  Simulation Mode: ON")
     print("=" * 50)
 
-    # Start real packet capture
     start_capture(
         predictor    = ids,
         socketio     = socketio,
         stats        = stats,
         class_counts = class_counts,
         alert_log    = alert_log,
+        raw_log      = raw_log,
     )
 
-    # Start stats broadcaster
     t = threading.Thread(target=broadcast_stats, daemon=True)
     t.start()
 
-    print("Dashboard → http://localhost:5000")
-    print("Frontend  → http://localhost:3000")
+    print("Backend  → http://localhost:5005")
+    print("Frontend → http://localhost:5173")
     print("=" * 50)
 
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False)
+    socketio.run(app, host="0.0.0.0", port=5005, debug=False)
