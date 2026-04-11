@@ -1,23 +1,3 @@
-"""
-╔══════════════════════════════════════════════════════════════╗
-║         IDS — NSL-KDD Model Trainer                         ║
-║  Pass train + test path → get trained model saved to disk   ║
-╚══════════════════════════════════════════════════════════════╝
-
-Usage:
-    python train.py --train path/to/KDDTrain+.txt --test path/to/KDDTest+.txt
-
-Output (saved to ./models/):
-    random_forest.pkl   ← best model
-    scaler.pkl          ← fitted StandardScaler
-    label_encoder.pkl   ← target LabelEncoder
-    cat_encoders.pkl    ← categorical feature encoders
-    feature_names.pkl   ← ordered list of feature names
-    training_report.txt ← full classification report
-
-Requirements:
-    pip install scikit-learn pandas numpy joblib imbalanced-learn
-"""
 
 import os
 import sys
