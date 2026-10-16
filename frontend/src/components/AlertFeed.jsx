@@ -65,14 +65,36 @@ function AlertItem({ alert, isNew }) {
         </span>
       </div>
 
-      {/* Row 2: IP route */}
-      <div className="text-[11px] text-slate-300 font-mono truncate mb-1">
-        <span className="text-slate-500">src </span>{alert.src_ip}
-        <span className="text-slate-600 mx-1.5">→</span>
-        <span className="text-slate-500">dst </span>{alert.dst_ip}
+      {/* Row 2: IP route & Action */}
+      <div className="flex items-center justify-between text-[11px] text-slate-300 font-mono truncate mb-1">
+        <div className="truncate">
+          <span className="text-slate-500">src </span>{alert.src_ip}
+          <span className="text-slate-600 mx-1.5">→</span>
+          <span className="text-slate-500">dst </span>{alert.dst_ip}
+        </div>
+        {alert.action && (
+          <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ml-2 flex-shrink-0 ${
+            alert.action === "BLOCK"
+              ? "bg-red-500/20 text-red-400 border-red-500/40"
+              : alert.action === "RATE_LIMIT"
+              ? "bg-amber-500/20 text-amber-400 border-amber-500/40"
+              : alert.action === "DROP"
+              ? "bg-purple-500/20 text-purple-400 border-purple-500/40"
+              : "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+          }`}>
+            {alert.action}
+          </span>
+        )}
       </div>
 
-      {/* Row 3: meta chips */}
+      {/* Row 3: Action reason if present */}
+      {alert.action_reason && (
+        <div className="text-[10px] text-slate-400 italic font-mono mb-1 truncate" title={alert.action_reason}>
+          ↳ {alert.action_reason}
+        </div>
+      )}
+
+      {/* Row 4: meta chips */}
       <div className="flex flex-wrap gap-2 mt-1">
         {[
           alert.service   && { label: alert.service },

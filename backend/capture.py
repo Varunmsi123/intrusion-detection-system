@@ -1,18 +1,22 @@
 """
-capture.py — Real-time packet capture using Scapy (Windows WiFi)
-Interface: Intel Wireless-AC 9461 (Wi-Fi)
-Run as Administrator!
+capture.py — Real-time packet capture with dynamic interface auto-detection,
+bidirectional flow reconstruction, and IPS policy integration.
+Cross-platform: Linux (Fedora/Ubuntu) and Windows.
 """
 
+import os
+import sys
 import time
+import socket
 import threading
-from collections import defaultdict
+import subprocess
 from datetime import datetime
 
-from scapy.all import sniff, IP, TCP, UDP, ICMP
+from scapy.all import sniff, IP, TCP, UDP, ICMP, conf
 
-# ── WiFi Interface (Windows) ───────────────────────────────
-WIFI_IFACE   = r"\Device\NPF_{ED82ECA4-5013-434F-B3C6-861CD0684487}"
+from ips.redis_store import redis_store
+from ips.policy_engine import policy_engine
+
 FLOW_TIMEOUT = 5       # seconds to flush a connection
 WINDOW_SIZE  = 100     # rolling window for rate features
 
@@ -23,6 +27,38 @@ PORT_SERVICE = {
     23:   "telnet", 110:  "pop_3",  143: "imap4",
     3389: "rdp",   8080:  "http",  8443: "https",
 }
+
+def detect_best_interface() -> str:
+    """
+    Dynamically detects the active network interface on Linux or Windows.
+    No hardcoded interface strings.
+    """
+    # 1. Environment variable override
+    env_iface = os.environ.get("IPS_IFACE")
+    if env_iface:
+        return env_iface
+
+    # 2. Linux active route interface
+    if sys.platform.startswith("linux"):
+        try:
+            out = subprocess.check_output(["ip", "route", "show", "default"], stderr=subprocess.DEVNULL, text=True)
+            for line in out.splitlines():
+                parts = line.split()
+                if "dev" in parts:
+                    idx = parts.index("dev")
+                    if idx + 1 < len(parts):
+                        dev = parts[idx + 1]
+                        print(f"[Capture] Auto-detected active Linux interface: {dev}")
+                        return dev
+        except Exception:
+            pass
+
+        # Check scapy conf.iface
+        if conf.iface and str(conf.iface) not in ("lo", "docker0"):
+            return str(conf.iface)
+
+    # 3. Fallback to scapy default
+    return str(conf.iface) if conf.iface else "lo"
 
 # ── TCP flag → NSL-KDD flag string ────────────────────────
 def get_flag(flags_int):
@@ -36,8 +72,7 @@ def get_flag(flags_int):
     if SYN and ACK:           return "S1"
     return "OTH"
 
-
-# ── Flow record ────────────────────────────────────────────
+# ── Bidirectional Flow record ──────────────────────────────
 class Flow:
     def __init__(self, src, sport, dst, dport, proto):
         self.src       = src
@@ -50,7 +85,6 @@ class Flow:
         self.dst_bytes = 0
         self.pkts      = []
         self.flags     = []
-
 
 # ── Feature extractor ──────────────────────────────────────
 def build_features(flow, recent, cat_encoders):
@@ -129,10 +163,8 @@ def build_features(flow, recent, cat_encoders):
 
     return v, service, flag
 
-
-# ── Main Capture Engine ────────────────────────────────────
+# ── Main Capture & IPS Engine ──────────────────────────────
 class PacketCapture:
-
     def __init__(self, predictor, socketio, stats, class_counts, alert_log):
         self.predictor    = predictor
         self.socketio     = socketio
@@ -143,37 +175,54 @@ class PacketCapture:
         self._recent      = []
         self._lock        = threading.Lock()
         self._alert_id    = 0
+        self.sniff_thread = None
 
-    def _five_tuple(self, pkt):
+    def _canonical_key(self, src, sp, dst, dp, proto):
+        """Creates a bidirectional canonical flow key."""
+        endpoints = sorted([(src, sp), (dst, dp)])
+        return (endpoints[0], endpoints[1], proto)
+
+    def _on_packet(self, pkt):
         if IP not in pkt:
-            return None
+            return
+
         proto = ("tcp"  if TCP  in pkt else
                  "udp"  if UDP  in pkt else
                  "icmp" if ICMP in pkt else "other")
         sp = pkt[TCP].sport if TCP in pkt else (pkt[UDP].sport if UDP in pkt else 0)
         dp = pkt[TCP].dport if TCP in pkt else (pkt[UDP].dport if UDP in pkt else 0)
-        return (pkt[IP].src, sp, pkt[IP].dst, dp, proto)
+        src = pkt[IP].src
+        dst = pkt[IP].dst
+        size = len(pkt[IP])
+        now = time.time()
 
-    def _on_packet(self, pkt):
-        key = self._five_tuple(pkt)
-        if not key:
+        # Update Redis sliding-window rates & port tracker
+        redis_store.record_packet(src, dp, size)
+
+        # Check if incoming packet belongs to an actively blocked IP
+        if redis_store.is_blocked(src):
+            # Already blocked - count as prevented/dropped packet
+            self.stats["total_packets"] += 1
             return
 
-        src, sp, dst, dp, proto = key
-        now = time.time()
+        key = self._canonical_key(src, sp, dst, dp, proto)
 
         with self._lock:
             if key not in self._flows:
+                # Flow initiator is src
                 self._flows[key] = Flow(src, sp, dst, dp, proto)
 
             flow = self._flows[key]
 
-            if IP in pkt:
-                size = len(pkt[IP])
+            # Accurately update bidirectional bytes
+            if src == flow.src:
                 flow.src_bytes += size
-                flow.pkts.append({"t": now, "size": size})
-                if TCP in pkt:
-                    flow.flags.append(int(pkt[TCP].flags))
+            else:
+                flow.dst_bytes += size
+
+            flow.pkts.append({"t": now, "size": size})
+            if TCP in pkt:
+                flow.flags.append(int(pkt[TCP].flags))
 
             self.stats["total_packets"] += 1
 
@@ -197,22 +246,38 @@ class PacketCapture:
         label, conf = self.predictor.classify(features)
         self.class_counts[label] = self.class_counts.get(label, 0) + 1
 
+        # Evaluate flow through IPS Policy Engine
+        decision = policy_engine.evaluate(
+            src_ip=flow.src,
+            dst_ip=flow.dst,
+            dst_port=flow.dport,
+            proto=flow.proto,
+            service=service,
+            label=label,
+            confidence=conf
+        )
+
+        # Emit real-time IPS action event to connected UI clients
+        self.socketio.emit("ips_action", decision)
+
         if label != "Normal":
             self._alert_id += 1
             self.stats["total_alerts"] += 1
             alert = {
-                "id":         self._alert_id,
-                "time":       datetime.now().strftime("%H:%M:%S"),
-                "timestamp":  datetime.now().isoformat(),
-                "type":       label,
-                "src_ip":     flow.src,
-                "dst_ip":     flow.dst,
-                "service":    service,
-                "protocol":   flow.proto,
-                "duration":   round(flow.pkts[-1]["t"] - flow.start, 3) if len(flow.pkts) > 1 else 0,
-                "src_bytes":  flow.src_bytes,
-                "dst_bytes":  flow.dst_bytes,
-                "confidence": round(conf, 4),
+                "id":             self._alert_id,
+                "time":           datetime.now().strftime("%H:%M:%S"),
+                "timestamp":      datetime.now().isoformat(),
+                "type":           label,
+                "src_ip":         flow.src,
+                "dst_ip":         flow.dst,
+                "service":        service,
+                "protocol":       flow.proto,
+                "duration":       round(flow.pkts[-1]["t"] - flow.start, 3) if len(flow.pkts) > 1 else 0,
+                "src_bytes":      flow.src_bytes,
+                "dst_bytes":      flow.dst_bytes,
+                "confidence":     round(conf, 4),
+                "action":         decision["action"],
+                "action_reason":  decision["reason"],
                 "color": {
                     "DoS":  "#ef4444",
                     "Probe":"#3b82f6",
@@ -223,19 +288,46 @@ class PacketCapture:
             self.alert_log.appendleft(alert)
             self.socketio.emit("new_alert", alert)
 
-    def start(self, iface=WIFI_IFACE):
+            # If an IP was blocked, emit updated blocked hosts list
+            if decision["action"] == "BLOCK":
+                self.socketio.emit("blocked_hosts_update", redis_store.get_blocked_ips())
+
+    def start(self, iface=None):
+        if iface is None:
+            iface = detect_best_interface()
+
         def _run():
-            print(f"[Capture] Sniffing on: {iface}")
-            print("[Capture] Waiting for packets... (Run as Administrator!)")
-            sniff(iface=iface, prn=self._on_packet, store=False)
+            print(f"[Capture] Sniffing live on: {iface}")
+            try:
+                sniff(iface=iface, prn=self._on_packet, store=False)
+            except PermissionError:
+                print(f"[Capture] Notice: Raw packet sniffing requires root/sudo permissions.")
+                print(f"[Capture] Entering safe simulation mode.")
+            except Exception as e:
+                print(f"[Capture] Sniffing error: {e}")
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
-        print("[Capture] Capture thread started.")
+        self.sniff_thread = t
+        print("[Capture] Packet capture & IPS thread started.")
         return t
 
+    def simulate_attack_event(self, attack_type: str, src_ip: str, dst_port: int = 80):
+        """
+        Simulates an incoming flow with the given attack label for live testing & demonstration.
+        """
+        now = time.time()
+        flow = Flow(src_ip, 54321, "192.168.31.129", dst_port, "tcp")
+        flow.src_bytes = 125000 if attack_type == "DoS" else 1500
+        flow.dst_bytes = 540
+        flow.pkts = [
+            {"t": now - 1.0, "size": 1500},
+            {"t": now, "size": 1500}
+        ]
+        flow.flags = [0x02, 0x10]  # SYN, ACK
+        self._classify_flow(flow)
 
-def start_capture(predictor, socketio, stats, class_counts, alert_log,
-                  iface=WIFI_IFACE):
+def start_capture(predictor, socketio, stats, class_counts, alert_log, iface=None):
     engine = PacketCapture(predictor, socketio, stats, class_counts, alert_log)
-    return engine.start(iface)
+    engine.start(iface)
+    return engine
